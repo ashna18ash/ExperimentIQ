@@ -69,7 +69,7 @@ The test suite covers:
 - SRM detection against configured allocation.
 - Primary metric outcome-window handling.
 
-Latest verified test result: **14 tests passed**.
+Latest verified test result: **25 tests passed, 0 failed (1 non-fatal pandas datetime-parsing warning)**.
 
 ## Reproducibility
 
