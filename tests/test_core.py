@@ -117,3 +117,149 @@ def test_result_history_distinguishes_audience_scale(tmp_path):
     assert len(stored["experiment_results"]) == 20
     checks = integrity_summary(stored)
     assert checks.loc[checks.check.str.contains("assigned-count reconciliation"), "status"].iloc[0] == "PASS"
+
+
+# ---------------------------------------------------------
+# Additional acceptance tests: allocation, guardrails,
+# metric versioning, and exact ground-truth decisions
+# ---------------------------------------------------------
+
+def test_unbalanced_40_60_allocation_is_not_flagged_as_srm():
+    frames = generate_dataset(10000, 10, 20261022)
+    exp_id = frames["experiments"].iloc[1]["experiment_id"]
+
+    result = analyze_experiment(
+        exp_id,
+        frames["assignments"],
+        frames["conversion_events"],
+        frames["exposure_events"],
+        frames["variants"],
+        frames["guardrail_metrics"],
+        experiments=frames["experiments"],
+        guardrail_observations=frames["guardrail_observations"],
+        metric_definitions=frames["metric_definitions"],
+    )
+
+    assert result["expected_allocation_a"] == 0.40
+    assert result["expected_allocation_b"] == 0.60
+    assert result["srm_status"] == "PASS"
+
+
+def test_guardrail_regression_is_detected_from_observations():
+    frames = generate_dataset(10000, 10, 20261022)
+    exp_id = frames["experiments"].iloc[4]["experiment_id"]
+
+    assignments = frames["assignments"].merge(
+        frames["variants"][["variant_id", "variant_key"]],
+        on="variant_id",
+        how="left",
+    )
+
+    experiment_assignments = assignments[
+        assignments["experiment_id"] == exp_id
+    ]
+
+    treatment_ids = set(
+        experiment_assignments.loc[
+            experiment_assignments["variant_key"] == "B",
+            "assignment_id",
+        ]
+    )
+
+    control_ids = set(
+        experiment_assignments.loc[
+            experiment_assignments["variant_key"] == "A",
+            "assignment_id",
+        ]
+    )
+
+    observations = frames["guardrail_observations"].copy()
+
+    treatment_mask = observations["assignment_id"].isin(treatment_ids)
+    control_mask = observations["assignment_id"].isin(control_ids)
+
+    # Force a clear regression in treatment observations and
+    # a clean control group to test the analytics calculation.
+    observations.loc[
+        treatment_mask, ["error_occurred", "refund_occurred"]
+    ] = True
+
+    observations.loc[
+        control_mask, ["error_occurred", "refund_occurred"]
+    ] = False
+
+    result = analyze_experiment(
+        exp_id,
+        frames["assignments"],
+        frames["conversion_events"],
+        frames["exposure_events"],
+        frames["variants"],
+        frames["guardrail_metrics"],
+        experiments=frames["experiments"],
+        guardrail_observations=observations,
+        metric_definitions=frames["metric_definitions"],
+    )
+
+    assert not result["guardrails"].empty
+    assert set(result["guardrails"]["status"]) == {"FAIL"}
+    assert result["decision"] == "DO NOT ROLL OUT - GUARDRAIL FAILURE"
+
+
+def test_metric_definition_uses_effective_version_at_analysis_time():
+    frames = generate_dataset(1000, 10, 20261022)
+    exp_id = frames["experiments"].iloc[0]["experiment_id"]
+
+    common_args = (
+        exp_id,
+        frames["assignments"],
+        frames["conversion_events"],
+        frames["exposure_events"],
+        frames["variants"],
+        frames["guardrail_metrics"],
+    )
+
+    before_version_2 = analyze_experiment(
+        *common_args,
+        experiments=frames["experiments"],
+        guardrail_observations=frames["guardrail_observations"],
+        metric_definitions=frames["metric_definitions"],
+        analysis_at="2026-10-31T23:59:00+00:00",
+    )
+
+    at_version_2 = analyze_experiment(
+        *common_args,
+        experiments=frames["experiments"],
+        guardrail_observations=frames["guardrail_observations"],
+        metric_definitions=frames["metric_definitions"],
+        analysis_at="2026-11-01T00:00:00+00:00",
+    )
+
+    assert before_version_2["metric_version"] == 1
+    assert at_version_2["metric_version"] == 2
+    assert before_version_2["metric_definition_id"] != (
+        at_version_2["metric_definition_id"]
+    )
+
+
+def test_ground_truth_expected_decisions_match_all_five_scenarios():
+    frames = generate_dataset(1000, 10, 20261022)
+    ground_truth = frames["ground_truth"]
+
+    expected = {
+        "MULTIPLE_VARIANT_ASSIGNMENT": "FLAG_CONFLICTING_ASSIGNMENT",
+        "EXPOSURE_BEFORE_ASSIGNMENT": "FLAG_INVALID_EVENT_ORDER",
+        "OUTCOME_WINDOW_INCONSISTENT": "FLAG_OUTSIDE_WINDOW",
+        "METRIC_CHANGED_AFTER_RESULTS": "FLAG_VERSION_DRIFT",
+        "SAMPLE_RATIO_MISMATCH": "FLAG_ALLOCATION_MISMATCH",
+    }
+
+    actual = dict(
+        zip(
+            ground_truth["issue_type"],
+            ground_truth["expected_decision"],
+        )
+    )
+
+    assert len(ground_truth) == 5
+    assert ground_truth["issue_type"].nunique() == 5
+    assert actual == expected
