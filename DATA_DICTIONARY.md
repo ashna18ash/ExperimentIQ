@@ -1,111 +1,349 @@
-# ExperimentIQ Data Dictionary
+# ExperimentIQ — Data Dictionary
+### Observed values versus supported values
 
-All IDs are immutable strings. Timestamps are ISO-8601 UTC strings. All generated records are synthetic. The full CSV/JSON source export includes a separate `ground_truth` table/file for evaluation; it is not an analytical input table.
+Allowed values documented in this file distinguish between:
 
-## 1. Entity and field definitions
+- **Observed values:** Values actually present in the current generated SQLite dataset.
+- **Supported values:** Values accepted or handled by application-level business logic.
 
-| Entity | Field | Type / unit | Required | Allowed values / uniqueness | Validation rule |
+The observed dataset is not necessarily an exhaustive representation of every supported application state. For example, the current dataset contains only eligible audience members (`eligible = 1`), while the schema and application logic represent eligibility as a Boolean field.
+
+SQLite declares primary-key and foreign-key constraints, but does not declare explicit `NOT NULL`, `UNIQUE`, or `CHECK` constraints on the documented columns. Required fields and business validation are therefore enforced through application logic and data-generation rules.
+
+**Version:** 1.1
+**Project:** Experimentation & Decision Intelligence
+**Database:** SQLite
+**Default dataset:** 50,000 audience members, 10 experiments
+**Default random seed:** `20261022`
+**Timestamp convention:** ISO 8601 text timestamps, generated in UTC.
+
+---
+
+## 1. Documentation conventions
+
+### Required-field notation
+
+- **Yes*** — required and populated by the current dataset generator; SQLite does not necessarily enforce `NOT NULL`.
+- **No** — may be `NULL` in the generated dataset.
+- **PK** — primary key declared in SQLite; uniqueness is enforced, while non-null values are additionally checked by application validation.
+- **FK** — foreign key, enforced by SQLite.
+- **Unique** — uniqueness requirement. A field is not necessarily protected by a separate SQLite `UNIQUE` constraint unless identified as a primary key.
+
+### SQLite data types
+
+| Type | Meaning |
+|---|---|
+| TEXT | Identifiers, descriptive values, categories and ISO timestamps |
+| INTEGER | Whole numbers and Boolean values (`0` or `1`) |
+| REAL | Decimal numbers, proportions, rates, monetary values and statistical measurements |
+
+### Validation conventions
+
+- Identifier values must follow their documented formats.
+- Foreign keys must reference an existing parent record.
+- Timestamps must be parseable ISO 8601 values.
+- Allocation proportions must be between 0 and 1 and sum to 1.
+- Proportions and rates must be between 0 and 1 unless explicitly documented as percentages.
+- Event chronology and experiment outcome-window rules are checked by application-level validation.
+- Ground-truth labels are kept separate from analytical inputs.
+
+**Important implementation note:** The current SQLite schema declares primary keys and foreign keys. Other field requirements, allowed values, and business rules are application-level validation requirements rather than universal SQLite `NOT NULL`, `CHECK`, or `UNIQUE` constraints.
+
+---
+
+# 2. Entity relationship overview
+
+| Parent entity | Child entity | Relationship | Relationship rule |
+|---|---|---|---|
+| Experiment | Variant | 1:N | Each variant belongs to one experiment |
+| Experiment | Assignment | 1:N | Each assignment belongs to one experiment |
+| AudienceMember | Assignment | 1:N | A user may participate in different experiments |
+| Variant | Assignment | 1:N | Each assignment references one variant |
+| Assignment | ExposureEvent | 1:N | An assignment may have zero or more exposures |
+| Assignment | ConversionEvent | 1:N | An assignment may have zero or more conversions |
+| Experiment | MetricDefinition | 1:N | Definitions may have multiple versions |
+| Experiment | GuardrailMetric | 1:N | An experiment can have multiple guardrails |
+| Assignment | GuardrailObservation | 1:N | Observations are associated with an assignment |
+| Experiment | ExperimentResult | 1:N | Result snapshots are retained across changed runs |
+
+`ground_truth` is an independent evaluation-label table. It does not have declared foreign keys or a declared primary key in the current implementation.
+
+---
+
+# 3. Field-level data dictionary
+
+## 3.1 experiments
+
+**Purpose:** Stores experiment master records, hypotheses, allocation configuration, lifecycle information and reproducibility settings.
+
+**Primary key:** `experiment_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
 |---|---|---|---|---|---|
-| Experiment | `experiment_id` | string PK | Yes | `EXP-2026-NNNNNN`, unique | Must be unique and non-null |
-| Experiment | `name` | string | Yes | Non-empty | Human-readable experiment name |
-| Experiment | `hypothesis` | string | Yes | Predeclared statement | Must be non-empty before analysis |
-| Experiment | `primary_metric` | enum | Yes | `conversion_rate` | Must match a metric definition |
-| Experiment | `status` | enum | Yes | draft/running/completed/paused | Must follow lifecycle rules |
-| Experiment | `start_at`, `end_at` | timestamp | Yes | UTC | `end_at >= start_at` |
-| Experiment | `allocation_a`, `allocation_b` | proportion | Yes | [0,1] | Each > 0 and sum to 1 |
-| Experiment | `seed` | integer | Yes | Fixed seed | Same parameters and seed reproduce the source data |
-| Experiment | `analysis_plan_version` | string | Yes | Version label | Result records retain the plan version |
-| Variant | `variant_id` | string PK | Yes | `VAR-<experiment-id>-A/B`, unique | Must reference one experiment |
-| Variant | `experiment_id` | string FK | Yes | Existing Experiment | Parent experiment must exist |
-| Variant | `name` | string | Yes | Control/Treatment | Non-empty |
-| Variant | `variant_key` | enum | Yes | A/B | One control and one treatment key per experiment |
-| Variant | `is_control` | boolean | Yes | true/false | A is control; B is treatment |
-| AudienceMember | `user_id` | string PK | Yes | `USR-NNNNNNN`, unique | Must be unique and non-null |
-| AudienceMember | `eligible` | boolean | Yes | true/false | Only eligible users may be assigned |
-| AudienceMember | `segment` | enum | Yes | new/returning/high_value | Must be an allowed segment |
-| AudienceMember | `country` | enum | Yes | IN/US/UK/CA | Synthetic country code |
-| AudienceMember | `created_at` | timestamp | Yes | UTC | Must parse as timestamp |
-| Assignment | `assignment_id` | string PK | Yes | `ASG-<experiment-id>-<user-id>`, unique | Must be unique and non-null |
-| Assignment | `experiment_id` | string FK | Yes | Existing Experiment | Parent must exist |
-| Assignment | `user_id` | string FK | Yes | Existing AudienceMember | User must exist and be eligible |
-| Assignment | `variant_id` | string FK | Yes | Existing Variant | Variant must belong to the same experiment |
-| Assignment | `assigned_at` | timestamp | Yes | UTC | Must parse; precedes valid exposure events |
-| Assignment | `assignment_status` | enum | Yes | assigned | Must be an allowed lifecycle state |
-| Assignment | `is_eligible` | boolean | Yes | true/false | Must be true for assigned records |
-| ExposureEvent | `exposure_id` | string PK | Yes | `EXPOS-2026-NNNNNN`, unique | Must be unique and non-null |
-| ExposureEvent | `assignment_id` | string FK | Yes | Existing Assignment | Parent assignment must exist |
-| ExposureEvent | `experiment_id`, `user_id`, `variant_id` | string FK / denormalized references | Yes | Must match Assignment | Parent consistency check |
-| ExposureEvent | `exposed_at` | timestamp | Yes | UTC | Must be >= assigned_at for valid records |
-| ExposureEvent | `telemetry_status` | enum | Yes | captured/missing | Missing telemetry remains visible as an exception |
-| ConversionEvent | `conversion_id` | string PK | Yes | `CONV-2026-NNNNNN`, unique | Must be unique and non-null |
-| ConversionEvent | `assignment_id` | string FK | Yes | Existing Assignment | Parent assignment must exist |
-| ConversionEvent | `experiment_id`, `user_id` | string FK / denormalized references | Yes | Must match Assignment | Parent consistency check |
-| ConversionEvent | `converted_at` | timestamp | Yes | UTC | Within 30 days of assignment for a valid outcome |
-| ConversionEvent | `conversion_value` | decimal / synthetic currency units | Yes | >= 0 | Must be non-negative |
-| ConversionEvent | `event_type` | enum | Yes | purchase | Must be an allowed conversion type |
-| MetricDefinition | `metric_definition_id` | string PK | Yes | `MET-NNNNNN-VN`, unique | Immutable version identifier |
-| MetricDefinition | `experiment_id` | string FK | Yes | Existing Experiment | Parent must exist |
-| MetricDefinition | `metric_name` | enum | Yes | conversion_rate | Must match the experiment primary metric |
-| MetricDefinition | `numerator`, `denominator` | string | Yes | Documented field names | Defines the calculation explicitly |
-| MetricDefinition | `unit` | enum | Yes | proportion | Values are proportions in [0,1] |
-| MetricDefinition | `version` | positive integer | Yes | Monotonic per experiment | A post-result effective date is flagged as version drift |
-| MetricDefinition | `effective_from`, `effective_to` | timestamp | Yes / optional | UTC / null for current | Effective intervals must be chronologically valid |
-| GuardrailMetric | `guardrail_id` | string PK | Yes | Unique ID | Must be unique and non-null |
-| GuardrailMetric | `experiment_id` | string FK | Yes | Existing Experiment | Parent must exist |
-| GuardrailMetric | `metric_name` | enum | Yes | error_rate/refund_rate | Must be an implemented guardrail |
-| GuardrailMetric | `threshold` | proportion | Yes | [0,1] | Must be within [0,1] |
-| GuardrailMetric | `direction` | enum | Yes | max/min | Defines which side of threshold is a failure |
-| GuardrailMetric | `unit` | enum | Yes | proportion | Must match metric unit |
-| GuardrailObservation | `guardrail_observation_id` | string PK | Yes | `GRO-2026-NNNNNN`, unique | Must be unique and non-null |
-| GuardrailObservation | `assignment_id` | string FK | Yes | Existing Assignment | Parent assignment must exist |
-| GuardrailObservation | `experiment_id` | string FK | Yes | Existing Experiment | Must match the experiment associated with the assignment |
-| GuardrailObservation | `user_id` | string FK | Yes | Existing AudienceMember | Must match the user associated with the assignment |
-| GuardrailObservation | `error_occurred` | boolean | Yes | true/false | Must be a valid boolean outcome |
-| GuardrailObservation | `refund_occurred` | boolean | Yes | true/false | Must be a valid boolean outcome |
-| GuardrailObservation | `observed_at` | timestamp | Yes | UTC | Must parse as a valid timestamp and satisfy observation chronology checks |
-| ExperimentResult | `experiment_result_id` | string PK | Yes | `RES-<experiment-id>-V1` or subsequent version | Unique result snapshot identifier |
-| ExperimentResult | `experiment_id` | string FK | Yes | Existing Experiment | Parent must exist |
-| ExperimentResult | `analysis_plan_version`, `generated_at` | string / timestamp | Yes | Version / UTC | Preserves analysis plan and result timestamp |
-| ExperimentResult | `dataset_seed`, `dataset_size` | integer / row count | Yes | Generator seed and audience row count | Identifies the synthetic source run used for the snapshot |
-| ExperimentResult | arm counts and conversions | integer counts | Yes | >= 0 | Reconcile to assignment and conversion source records |
-| ExperimentResult | rates, uplift, p-value, CI | proportion / percent | Yes | p-value in [0,1] | Derived from source records, not independently randomized |
-| ExperimentResult | `srm_status`, `decision` | enum/string | Yes | PASS/FAIL and decision labels | Derived from allocation, evidence and guardrails |
+| experiment_id | TEXT | Yes* | `EXP-2026-000001` format | Yes — PK | Must be a valid experiment identifier |
+| name | TEXT | Yes* | Experiment descriptive name | No | Must not be empty |
+| hypothesis | TEXT | Yes* | Free-text hypothesis | No | Must describe the intended treatment effect |
+| primary_metric | TEXT | Yes* | `conversion_rate` in current dataset | No | Must match a defined metric |
+| status | TEXT | Yes* | `completed` in current dataset | No | Must be a recognized lifecycle state |
+| start_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must parse as a valid timestamp |
+| end_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must be later than or equal to start_at |
+| allocation_a | REAL | Yes* | Proportion from 0 to 1 | No | Must be between 0 and 1 |
+| allocation_b | REAL | Yes* | Proportion from 0 to 1 | No | Must be between 0 and 1; A + B must equal 1 |
+| seed | INTEGER | Yes* | Integer random seed; default `20261022` | No | Must be an integer used for reproducible generation |
+| analysis_plan_version | TEXT | Yes* | Version string; currently `1.0` | No | Must identify the analysis-plan version |
 
-## 2. Relationships and cardinality
+## 3.2 variants
 
-- Experiment 1:N Variant.
-- Experiment 1:N Assignment.
-- AudienceMember 1:N Assignment across experiment history.
-- Variant 1:N Assignment.
-- Assignment 1:N ExposureEvent (optional; noncompliance means zero exposures).
-- Assignment 1:N ConversionEvent (optional; zero or more conversion events).
-- Experiment 1:N MetricDefinition (effective-dated version history).
-- Experiment 1:N GuardrailMetric.
-- Experiment 1:N GuardrailObservation.
-- Assignment 1:N GuardrailObservation.
-- AudienceMember 1:N GuardrailObservation.
-- Experiment 1:N ExperimentResult (versioned snapshots; unchanged regenerations are idempotent and changed datasets append a new result version).
+**Purpose:** Defines the control and treatment arms belonging to each experiment.
 
-Assignment is the bridge linking AudienceMember and Variant within an Experiment. GuardrailObservation records are associated with their corresponding Assignment, Experiment and AudienceMember. No unmodelled many-to-many relationship is required by the current scope.
+**Primary key:** `variant_id`
 
-The current generator creates one GuardrailObservation for each normal assignment. Each observation stores an error outcome, refund outcome and observation timestamp.
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| variant_id | TEXT | Yes* | `VAR-<experiment-id>-A/B` | Yes — PK | Must identify a valid experiment variant |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id` |
+| name | TEXT | Yes* | `Control`, `Treatment` | No | Must match the variant key's intended role |
+| variant_key | TEXT | Yes* | `A`, `B` | No | Must be one of the supported experiment arms |
+| is_control | INTEGER | Yes* | Boolean: `0` or `1` | No | A must be control (`1`); B must be treatment (`0`) |
 
-## 3. Lifecycle and exception handling
+**Relationship:** One experiment has multiple variants. The current generator creates two variants per experiment.
 
-- Experiment: draft -> running -> completed, or paused.
-- Assignment: assigned -> zero or more exposure events -> zero or more conversion events.
-- GuardrailObservation records capture assignment-level error and refund outcomes. They retain references to the related assignment, experiment and audience member and are validated for referential consistency.
-- Event and observation records are retained as source records. Deliberate negative scenarios are labelled in the separate `ground_truth` evaluation file and detected in the exception queue.
-- Source entity/event tables are regenerated as an explicit local demo reset. Experiment result snapshots are preserved and versioned across changed regenerations; identical reruns do not create duplicate snapshots. A production implementation should use append-only event history and database migrations rather than replacing source tables.
+## 3.3 audience_members
 
-## 4. Ground-truth scenario labels
+**Purpose:** Stores synthetic user-level audience master data and eligibility information.
 
-The following scenario labels are generated from documented injection rules:
+**Primary key:** `user_id`
 
-- `MULTIPLE_VARIANT_ASSIGNMENT`
-- `EXPOSURE_BEFORE_ASSIGNMENT`
-- `OUTCOME_WINDOW_INCONSISTENT`
-- `METRIC_CHANGED_AFTER_RESULTS`
-- `SAMPLE_RATIO_MISMATCH`
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| user_id | TEXT | Yes* | `USR-0000001` format | Yes — PK | Must be a valid user identifier |
+| eligible | INTEGER | Yes* | Boolean: `0` or `1` | No | Must represent audience eligibility |
+| segment | TEXT | Yes* | `new`, `returning`, `high_value` | No | Must belong to the supported segment categories |
+| country | TEXT | Yes* | `IN`, `US`, `UK`, `CA` | No | Must be a supported country code in the dataset |
+| created_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must parse as a valid timestamp |
 
-They are stored separately from analytical input data and used only to evaluate whether the validation layer detects the known scenario types.
+**Relationship:** One audience member may have assignments in multiple experiments. The current generated dataset distributes audience members across experiments.
+
+## 3.4 assignments
+
+**Purpose:** Records randomized assignment of eligible users to experiment variants. This is the source of truth for intention-to-treat analysis.
+
+**Primary key:** `assignment_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| assignment_id | TEXT | Yes* | `ASG-<experiment-id>-<user-id>` | Yes — PK | Must identify an assignment record |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id` |
+| user_id | TEXT | Yes* | Existing user identifier | No | FK → `audience_members.user_id` |
+| variant_id | TEXT | Yes* | Existing variant identifier | No | FK → `variants.variant_id`; variant must belong to the same experiment |
+| assigned_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must parse as a valid assignment timestamp |
+| assignment_status | TEXT | Yes* | `assigned` in current dataset | No | Must be a recognized assignment state |
+| is_eligible | INTEGER | Yes* | Boolean: `0` or `1` | No | Must agree with eligibility rules for the assigned user |
+
+**Business rule:** A user should not be assigned to conflicting variants within the same experiment. The validation layer deliberately identifies the conflicting-assignment anomaly.
+
+## 3.5 exposure_events
+
+**Purpose:** Records whether an assigned user was exposed to the assigned experiment variant and the state of exposure telemetry.
+
+**Primary key:** `exposure_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| exposure_id | TEXT | Yes* | `EXPOS-2026-000001` format | Yes — PK | Must be a valid exposure identifier |
+| assignment_id | TEXT | Yes* | Existing assignment identifier | No | FK → `assignments.assignment_id` |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id`; must match assignment |
+| user_id | TEXT | Yes* | Existing user identifier | No | FK → `audience_members.user_id`; must match assignment |
+| variant_id | TEXT | Yes* | Existing variant identifier | No | FK → `variants.variant_id`; must match assignment |
+| exposed_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must be at or after assignment time |
+| telemetry_status | TEXT | Yes* | `captured`, `missing` | No | Must be one of the supported telemetry states |
+
+**Business rule:** Exposure is not assumed merely because an assignment exists. Missing exposure and telemetry records remain distinguishable.
+
+## 3.6 conversion_events
+
+**Purpose:** Stores conversion outcomes attributed to an assignment, including conversion time, value and event category.
+
+**Primary key:** `conversion_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| conversion_id | TEXT | Yes* | `CONV-2026-000001` format | Yes — PK | Must be a valid conversion identifier |
+| assignment_id | TEXT | Yes* | Existing assignment identifier | No | FK → `assignments.assignment_id` |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id`; must match assignment |
+| user_id | TEXT | Yes* | Existing user identifier | No | FK → `audience_members.user_id`; must match assignment |
+| converted_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must be at or after assignment time and within the 30-day analysis window to count |
+| conversion_value | REAL | Yes* | Positive numeric value; synthetic currency-like units | No | Must be numeric and non-negative |
+| event_type | TEXT | Yes* | `purchase` in current dataset | No | Must be a recognized conversion event type |
+
+**Business rule:** The primary conversion analysis counts an assignment at most once, even if multiple conversion records exist. Conversion events outside the 30-day window are excluded from the primary metric.
+
+## 3.7 metric_definitions
+
+**Purpose:** Stores versioned definitions for experiment metrics, including numerator, denominator and effective dates.
+
+**Primary key:** `metric_definition_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| metric_definition_id | TEXT | Yes* | `MET-000001-V1` format | Yes — PK | Must identify a metric-definition version |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id` |
+| metric_name | TEXT | Yes* | `conversion_rate` in current dataset | No | Must identify a recognized metric |
+| numerator | TEXT | Yes* | `converted_assigned_users` or `converted_exposed_users` in current scenarios | No | Must describe the numerator population |
+| denominator | TEXT | Yes* | `assigned_users` or `exposed_users` in current scenarios | No | Must describe the denominator population |
+| unit | TEXT | Yes* | `proportion` in current dataset | No | Must identify the measurement unit |
+| version | INTEGER | Yes* | Positive integer; versions 1, 2, etc. | No | Must be greater than zero and identify the definition version |
+| effective_from | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must parse as a valid effective-start timestamp |
+| effective_to | TEXT | No | ISO 8601 UTC timestamp or NULL | No | When present, must be later than or equal to effective_from |
+
+**Business rule:** The analytics layer selects the latest metric definition effective at the analysis timestamp. A definition introduced after the analysis snapshot must not silently change that historical result.
+
+## 3.8 guardrail_metrics
+
+**Purpose:** Defines experiment safety metrics and their acceptable thresholds.
+
+**Primary key:** `guardrail_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| guardrail_id | TEXT | Yes* | `GRD-000001-01` format | Yes — PK | Must identify a guardrail definition |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id` |
+| metric_name | TEXT | Yes* | `error_rate`, `refund_rate` | No | Must be a supported guardrail metric |
+| threshold | REAL | Yes* | Proportion from 0 to 1 | No | Must be within the valid proportion range |
+| direction | TEXT | Yes* | `max`, `min` | No | `max` means the observed rate must not exceed the threshold; `min` means it must not fall below it |
+| unit | TEXT | Yes* | `proportion` | No | Must match the metric's measurement unit |
+
+**Current thresholds:** Error rate 0.08; refund rate 0.06. These are synthetic demonstration thresholds.
+
+## 3.9 guardrail_observations
+
+**Purpose:** Stores assignment-level source observations used to calculate actual control and treatment guardrail rates.
+
+**Primary key:** `guardrail_observation_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| guardrail_observation_id | TEXT | Yes* | `GRO-2026-000001` format | Yes — PK | Must identify a unique observation |
+| assignment_id | TEXT | Yes* | Existing assignment identifier | No | FK → `assignments.assignment_id` |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id`; must match assignment |
+| user_id | TEXT | Yes* | Existing user identifier | No | FK → `audience_members.user_id`; must match assignment |
+| error_occurred | INTEGER | Yes* | Boolean: `0` or `1` | No | Must represent whether an error occurred |
+| refund_occurred | INTEGER | Yes* | Boolean: `0` or `1` | No | Must represent whether a refund occurred |
+| observed_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must parse as a valid observation timestamp and follow assignment time |
+
+**Business rule:** Guardrail rates are calculated from these source observations and the corresponding assignment variants. They are not independently invented by the analytics layer.
+
+## 3.10 experiment_results
+
+**Purpose:** Stores persisted experiment-analysis snapshots, including sample sizes, conversions, rates, uncertainty, SRM status and the resulting decision.
+
+**Primary key:** `experiment_result_id`
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| experiment_result_id | TEXT | Yes* | `RES-<experiment-id>-V1` format | Yes — PK | Must identify a unique result snapshot version |
+| experiment_id | TEXT | Yes* | Existing experiment identifier | No | FK → `experiments.experiment_id` |
+| analysis_plan_version | TEXT | Yes* | Version string; currently `1.0` | No | Must identify the analysis plan used |
+| generated_at | TEXT | Yes* | ISO 8601 UTC timestamp | No | Must parse as a valid analysis snapshot timestamp |
+| dataset_seed | INTEGER | Yes* | Integer random seed | No | Must match the seed used to generate the source dataset |
+| dataset_size | INTEGER | Yes* | Non-negative count of audience records | No | Must be consistent with the generated dataset |
+| control_assigned | INTEGER | Yes* | Non-negative assignment count | No | Must be consistent with the analyzed control arm |
+| treatment_assigned | INTEGER | Yes* | Non-negative assignment count | No | Must be consistent with the analyzed treatment arm |
+| control_conversions | INTEGER | Yes* | Non-negative conversion count | No | Must not exceed control_assigned |
+| treatment_conversions | INTEGER | Yes* | Non-negative conversion count | No | Must not exceed treatment_assigned |
+| control_rate | REAL | Yes* | Proportion from 0 to 1 | No | Must equal control_conversions divided by control_assigned when the denominator is positive |
+| treatment_rate | REAL | Yes* | Proportion from 0 to 1 | No | Must equal treatment_conversions divided by treatment_assigned when the denominator is positive |
+| uplift_pct | REAL | Yes* | Relative percentage uplift; percentage points are not implied | No | Calculated from treatment and control rates; must be finite |
+| p_value | REAL | Yes* | Probability from 0 to 1 | No | Must be a valid statistical p-value |
+| ci_low | REAL | Yes* | Absolute difference in conversion proportions | No | Must be the lower bound of the treatment-minus-control confidence interval |
+| ci_high | REAL | Yes* | Absolute difference in conversion proportions | No | Must be greater than or equal to ci_low |
+| srm_status | TEXT | Yes* | `PASS`, `FAIL` | No | Must reflect the sample-ratio mismatch assessment against declared allocation |
+| decision | TEXT | Yes* | `DO NOT ROLL OUT - SAMPLE RATIO MISMATCH`, `DO NOT ROLL OUT - GUARDRAIL FAILURE`, `PROMISING - REVIEW`, `TREATMENT UNDERPERFORMS`, `INCONCLUSIVE` | No | Must follow the documented decision rules |
+
+**Snapshot behavior:** Initial results use version `V1`. When a changed dataset produces a different result, a new version is appended. Identical results are not duplicated. Result snapshots are retained when source data is regenerated.
+
+---
+
+# 4. Evaluation labels
+
+## 4.1 ground_truth
+
+**Purpose:** Stores expected anomaly labels for evaluating whether validation and decision logic identify deliberately injected data-quality scenarios.
+
+**Primary key:** None declared.
+**Foreign keys:** None declared.
+
+| Field | SQLite type | Required | Allowed values / units | Unique | Validation |
+|---|---|---|---|---|---|
+| entity_type | TEXT | Yes* | `Assignment`, `ExposureEvent`, `ConversionEvent`, `MetricDefinition`, `Experiment` | No | Must identify the entity containing the injected anomaly |
+| entity_id | TEXT | Yes* | Identifier of the affected entity | No | Must refer to the intended generated anomaly record |
+| issue_type | TEXT | Yes* | `MULTIPLE_VARIANT_ASSIGNMENT`, `EXPOSURE_BEFORE_ASSIGNMENT`, `OUTCOME_WINDOW_INCONSISTENT`, `METRIC_CHANGED_AFTER_RESULTS`, `SAMPLE_RATIO_MISMATCH` | No | Must identify a supported anomaly category |
+| expected_decision | TEXT | Yes* | `FLAG_CONFLICTING_ASSIGNMENT`, `FLAG_INVALID_EVENT_ORDER`, `FLAG_OUTSIDE_WINDOW`, `FLAG_VERSION_DRIFT`, `FLAG_ALLOCATION_MISMATCH` | No | Must match the documented expected response for the issue type |
+
+**Evaluation rule:** Ground-truth records must not be used as input to the analytical decision calculation. They exist separately so the application can compare detected issues with known synthetic anomalies.
+
+---
+
+# 5. Defined anomaly scenarios
+
+| Scenario | Affected entity | Issue type | Expected decision |
+|---|---|---|---|
+| Same user assigned to conflicting variants | Assignment | `MULTIPLE_VARIANT_ASSIGNMENT` | `FLAG_CONFLICTING_ASSIGNMENT` |
+| Exposure timestamp precedes assignment | ExposureEvent | `EXPOSURE_BEFORE_ASSIGNMENT` | `FLAG_INVALID_EVENT_ORDER` |
+| Conversion occurs outside the 30-day outcome window | ConversionEvent | `OUTCOME_WINDOW_INCONSISTENT` | `FLAG_OUTSIDE_WINDOW` |
+| Metric definition changes after analysis snapshot | MetricDefinition | `METRIC_CHANGED_AFTER_RESULTS` | `FLAG_VERSION_DRIFT` |
+| Observed assignment distribution violates declared allocation | Experiment | `SAMPLE_RATIO_MISMATCH` | `FLAG_ALLOCATION_MISMATCH` |
+
+---
+
+# 6. Integrity and business validation rules
+
+The following rules complement the field-level definitions.
+
+1. **Primary-key integrity:** Every declared primary key must be unique; application validation also checks that primary-key values are non-null.
+2. **Foreign-key integrity:** Every child reference must resolve to an existing parent record.
+3. **Variant consistency:** An assignment's variant must belong to the same experiment as the assignment.
+4. **Assignment consistency:** A user must not receive conflicting variants within the same experiment.
+5. **Eligibility:** Only eligible users should be assigned.
+6. **Exposure chronology:** Exposure must not precede assignment.
+7. **Conversion attribution:** A conversion must reference the correct assignment, user and experiment.
+8. **Outcome window:** Only conversions between assignment time and 30 days after assignment count toward the primary conversion metric.
+9. **Metric versioning:** Metric definitions must be selected according to their effective dates.
+10. **Randomization quality:** Observed arm counts must be checked against the experiment's declared allocation.
+11. **Guardrail assessment:** Observed guardrail rates must be compared with the configured thresholds.
+12. **Result traceability:** Result snapshots must preserve the analysis-plan version, generation timestamp, dataset seed and dataset size.
+13. **Ground-truth separation:** Evaluation labels must not influence the analytical results being evaluated.
+
+---
+
+# 7. Current dataset reference
+
+| Dataset characteristic | Current default |
+|---|---:|
+| Experiments | 10 |
+| Audience members | 50,000 |
+| Variants | 20 |
+| Assignments | 50,001, including one deliberate conflicting-assignment anomaly |
+| Guardrail observations | 50,000 |
+| Guardrail definitions | 20 |
+| Metric definitions | 11 |
+| Ground-truth anomaly labels | 5 |
+| Analysis outcome window | 30 days |
+| Default seed | 20261022 |
+
+The dataset is synthetic and intended for experimentation-system validation, reproducibility testing and demonstration. It does not represent actual customer activity.
+
+---
+
+# 8. Schema maintenance
+
+When a field is added, removed or renamed in the generator or SQLite storage layer:
+
+1. Update this dictionary.
+2. Verify the generated DataFrame column.
+3. Verify the SQLite column and its declared type.
+4. Update primary-key or foreign-key documentation if relationships change.
+5. Update validation rules and tests.
+6. Regenerate and verify the exported documentation bundle.
+
+**Source of truth:** `src/generator.py`, `src/storage.py`, `src/validation.py` and `src/analytics.py`.
